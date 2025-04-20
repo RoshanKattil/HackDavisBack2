@@ -609,7 +609,13 @@ def get_transfer_log():
     log = []
     for t in transfers:
         # 2) Company who did the transfer
-        company = t.get("companyName", "Unknown")
+        company = t.get("companyName")
+        if not company:
+            mat = materials_col.find_one(
+                {"materialId": t["materialId"]},
+                {"companyName": 1, "_id": 0}
+            )
+            company = mat.get("companyName") if mat else "Unknown"
 
         # 3) Shorten the txHash to 10 chars
         txid = t.get("txHash", "")[:10]
