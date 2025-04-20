@@ -422,5 +422,82 @@ def get_waste(waste_id):
     })
     return jsonify(m), 200
 
+from flask import jsonify
+
+@app.route("/api/materials/<material_id>/featurecollection", methods=["GET"])
+def material_featurecollection(material_id):
+    # 1. Look up the material (for e.g. company metadata)
+    material = materials_col.find_one({"materialId": material_id}, {"_id": 0})
+    if not material:
+        return jsonify({"error": "Material not found"}), 404
+
+    company = material.get("metadata", {}).get("company", "Unknown Company")
+
+    # 2. Load its transfers in chronological order
+    transfers = list(transfers_col
+                     .find({"materialId": material_id})
+                     .sort("timestamp", 1))
+
+    if not transfers:
+        return jsonify({"type": "FeatureCollection", "features": []}), 200
+
+    features = []
+
+    # 3. Build Point features for each 'from' and 'to'
+    for t in transfers:
+        # departure Point
+        features.append({
+            "type": "Feature",
+            "geometry": t["from"],
+            "properties": {
+                "company":        company,
+                "status":         "In Transit",
+                "description":    f"Departed at {t['timestamp']}",
+                "transaction_id": t.get("txHash")
+            }
+        })
+        # arrival Point
+        features.append({
+            "type": "Feature",
+            "geometry": t["to"],
+            "properties": {
+                "company":        company,
+                "status":         "Delivered",
+                "description":    f"Arrived at {t['timestamp']}",
+                "transaction_id": t.get("txHash")
+            }
+        })
+
+    # 4. Build a LineString that strings all points together
+    coords = []
+    for t in transfers:
+        frm = t["from"]["coordinates"]
+        to  = t["to"]["coordinates"]
+        # avoid duplicating the end of one step as the start of the next
+        if not coords or coords[-1] != frm:
+            coords.append(frm)
+        coords.append(to)
+
+    features.append({
+        "type": "Feature",
+        "geometry": {
+            "type":        "LineString",
+            "coordinates": coords
+        },
+        "properties": {
+            "company":     company,
+            "route_id":    f"route_{material_id}",
+            "description": f"Route for {material_id}",
+            "status":      "On Schedule"
+        }
+    })
+
+    # 5. Return the FeatureCollection
+    return jsonify({
+        "type":     "FeatureCollection",
+        "features": features
+    }), 200
+
+
 if __name__ == "__main__":
     app.run(debug=True, port=8888)
