@@ -1,0 +1,19 @@
+# --- core ---
+Flask==3.1.3
+python-dotenv==1.0.1
+
+# --- database ---
+pymongo==4.7.0
+
+# --- Ethereum / web3 ---
+web3==6.14.0           # includes eth-account
+eth-abi==5.0.2          # explicit pin for web3 6.x
+eth-account==0.10.0
+
+# --- utilities ---
+Jinja2>=3.1             # Flask dependency, pinned loosely
+Werkzeug>=3.1           # Flask dependency
+
+# --- dev / optional ---
+pytest>=8.1
+ipython>=8.22
