@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
+
 """
 init_db.py
 
 Initialize the MongoDB for chain_custody_db from scratch,
-using simple lat/long fields instead of GeoJSON,
+using GeoJSON Point fields instead of simple lat/long,
 and creating named indexes to avoid conflicts.
 """
-from pymongo import MongoClient, ASCENDING
+
+from pymongo import MongoClient, ASCENDING, GEOSPHERE
 
 def main():
     # Connect to local MongoDB
@@ -28,10 +30,10 @@ def main():
         unique=True
     )
     materials.create_index(
-        [("location.lat", ASCENDING), ("location.lng", ASCENDING)],
-        name="location_lat_lng_idx"
+        [("location", GEOSPHERE)],
+        name="location_2dsphere_idx"
     )
-    print("Created 'materials' collection with indexes on materialId and location.lat/lng")
+    print("Created 'materials' collection with indexes on materialId and geo location")
 
     # 2. Transfers collection (named to match app.py)
     transfers = db["transfers"]
@@ -56,6 +58,11 @@ def main():
         [("wasteId", ASCENDING), ("timestamp", ASCENDING)],
         name="waste_history_ts_idx"
     )
+    # If you also store geo points for each step, you could add:
+    # waste_history.create_index(
+    #     [("from", GEOSPHERE), ("to", GEOSPHERE)],
+    #     name="waste_history_geo_idx"
+    # )
     print("Created 'waste_history' collection with index waste_history_ts_idx")
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ import json
 import time
 
 from flask import Flask, jsonify, request, Response, send_file
-from pymongo import MongoClient, ASCENDING
+from pymongo import MongoClient, ASCENDING, GEOSPHERE
 from pymongo.errors import DuplicateKeyError
 from web3 import Web3
 from web3.exceptions import ContractLogicError
@@ -20,12 +20,8 @@ db          = client["chain_custody_db"]
 
 # materials collection
 materials_col = db["materials"]
-materials_col.create_index(
-    [("materialId", ASCENDING)],
-    name="materialId_1",
-    unique=True
-)
-# ← no GeoJSON index any more!
+materials_col.create_index([("materialId", ASCENDING)], name="materialId_1", unique=True)
+materials_col.create_index([("location", GEOSPHERE)], name="location_2dsphere_idx")
 
 # transfers history collection
 transfers_col = db["transfers"]
@@ -97,10 +93,12 @@ def create_material():
         "createdAt":    int(time.time()),
     }
     if isinstance(data.get("location"), dict):
-        new_doc["location"] = {
-            "lat": data["location"]["lat"],
-            "lng": data["location"]["lng"]
-        }
+        lat = data["location"]["lat"]
+    lng = data["location"]["lng"]
+    new_doc["location"] = {
+        "type": "Point",
+        "coordinates": [lng, lat]
+    }
 
     # ── 1A. initialize on‑chain ─────────────────
     try:
@@ -148,46 +146,85 @@ def get_status(material_id):
         return jsonify({"error": "Not found"}), 404
     return jsonify({"status": m["status"]}), 200
 
+def to_point(d):
+    # helper to convert {lat, lng} → GeoJSON Point
+    return {"type": "Point", "coordinates": [d["lng"], d["lat"]]}
+
 @app.route("/api/materials/<material_id>/transfer", methods=["POST"])
 def transfer_material(material_id):
-    data       = request.json or {}
+    data = request.json or {}
+
+    # 1. Validate inputs
     new_holder = data.get("newHolder")
-    from_info  = data.get("from")
-    to_info    = data.get("to")
-
+    from_info  = data.get("from")  # {"lat": ..., "lng": ...}
+    to_info    = data.get("to")    # {"lat": ..., "lng": ...}
     if not new_holder or not from_info or not to_info:
-        return jsonify({"error":"newHolder, from and to are all required"}), 400
+        return jsonify({"error": "newHolder, from and to are all required"}), 400
 
-    existing = materials_col.find_one({"materialId": material_id}, {"_id":0})
+    # 2. Look up current holder
+    existing = materials_col.find_one({"materialId": material_id}, {"_id": 0})
     if not existing:
-        return jsonify({"error":"Not found"}), 404
+        return jsonify({"error": "Not found"}), 404
     prev_holder = existing["currentHolder"]
 
+    # 3. On‑chain transfer
     try:
         tx_hash = contract.functions.transferMaterial(material_id, new_holder)\
-                    .transact({"from": prev_holder})
+                          .transact({"from": prev_holder})
         receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
     except ContractLogicError as e:
-        return jsonify({"error":"Transfer failed","reason":str(e)}), 409
+        return jsonify({"error": "Transfer failed", "reason": str(e)}), 409
 
-    _, seq, _, _ = contract.functions.getMaterial(material_id).call()
+    # 4. Fetch updated on‑chain state
+    #    returns: (holder, sequence, description, status)
+    holder, seq, _, _ = contract.functions.getMaterial(material_id).call()
+
+    # 5. Update the Mongo “materials” record
     materials_col.update_one(
         {"materialId": material_id},
         {"$set": {
-            "currentHolder": new_holder,
-            "lastSequence":  seq,
-            "txHash":        receipt.transactionHash.hex()
+            "currentHolder": holder,
+            "lastSequence": seq,
+            "txHash": receipt.transactionHash.hex()
         }}
     )
+
+    # 6. GeoJSON helpers
+    def to_point(d):
+        return {
+            "type": "Point",
+            "coordinates": [d["lng"], d["lat"]]
+        }
+
+    pt_from = to_point(from_info)
+    pt_to   = to_point(to_info)
+    line    = {
+        "type": "LineString",
+        "coordinates": [
+            pt_from["coordinates"],
+            pt_to["coordinates"]
+        ]
+    }
+    path = {
+        "type": "GeometryCollection",
+        "geometries": [pt_from, line, pt_to]
+    }
+
+    # 7. Log the transfer step (point–line–point)
     transfers_col.insert_one({
-        "materialId": material_id,
-        "from":       from_info,
-        "to":         to_info,
-        "timestamp":  int(time.time()),
-        "txHash":     receipt.transactionHash.hex()
+        "materialId":   material_id,
+        "from":         pt_from,
+        "to":           pt_to,
+        "transferPath": path,
+        "timestamp":    int(time.time()),
+        "txHash":       receipt.transactionHash.hex()
     })
-    updated = materials_col.find_one({"materialId": material_id}, {"_id":0})
+
+    # 8. Return the fresh material record
+    updated = materials_col.find_one({"materialId": material_id}, {"_id": 0})
     return jsonify(updated), 200
+
+
 
 @app.route("/api/materials/<material_id>/transfers", methods=["GET"])
 def list_transfers(material_id):
