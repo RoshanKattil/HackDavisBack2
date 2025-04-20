@@ -7,42 +7,135 @@ import time
 from flask import Flask, jsonify, request, Response, send_file
 from pymongo import MongoClient, ASCENDING, GEOSPHERE
 from pymongo.errors import DuplicateKeyError
+from werkzeug.security import generate_password_hash, check_password_hash
+import jwt
+from datetime import datetime, timedelta
+from functools import wraps
 from web3 import Web3
 from web3.exceptions import ContractLogicError
 from reportlab.pdfgen import canvas as pdf_canvas
+from flask_cors import CORS
+
+def normalize_point(d):
+    # Accept a full GeoJSON Point
+    if isinstance(d, dict) and d.get("type") == "Point" and isinstance(d.get("coordinates"), list):
+        return d
+    # Or accept a simple {lat, lng}
+    if isinstance(d, dict) and "lat" in d and "lng" in d:
+        return {"type":"Point","coordinates":[d["lng"], d["lat"]]}
+    raise ValueError("location must be GeoJSON Point or {lat,lng}")
 
 app = Flask(__name__)
+CORS(app, supports_credentials=True)  
 
 # ─── MongoDB Setup ─────────────────────────────────────────────────────────────
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
-client      = MongoClient(MONGODB_URI)
-db          = client["chain_custody_db"]
+client = MongoClient(os.getenv("MONGODB_URI", "mongodb://localhost:27017"))
+db     = client["chain_custody_db"]
 
-# materials collection
+# Materials
 materials_col = db["materials"]
-materials_col.create_index([("materialId", ASCENDING)], name="materialId_1", unique=True)
-materials_col.create_index([("location", GEOSPHERE)], name="location_2dsphere_idx")
+materials_col.create_index(
+    [("materialId", ASCENDING)],
+    name="materialId_1",
+    unique=True
+)
+materials_col.create_index(
+    [("location", GEOSPHERE)],
+    name="location_2dsphere_idx"
+)
 
-# transfers history collection
+# Transfers
 transfers_col = db["transfers"]
 transfers_col.create_index(
     [("materialId", ASCENDING), ("timestamp", ASCENDING)],
     name="material_ts_idx"
 )
 
-# hazardous‑waste collections
-waste_col   = db["waste"]
+# Waste (low priority for now)
+waste_col = db["waste"]
 waste_col.create_index(
     [("wasteId", ASCENDING)],
     name="wasteId_1",
     unique=True
 )
-
 history_col = db["waste_history"]
 history_col.create_index(
     [("wasteId", ASCENDING), ("timestamp", ASCENDING)],
     name="waste_history_ts_idx"
 )
+
+# ─── Companies Auth Setup ───────────────────────────────────────────────────────
+companies_col = db["companies"]
+companies_col.create_index(
+    [("companyName", ASCENDING)],
+    name="companyName_1",
+    unique=True
+)
+
+# Secret for JWT signing
+app.config["SECRET_KEY"] = os.getenv("FLASK_SECRET", "super-secret-key")
+
+def require_auth(f):
+    @wraps(f)
+    def wrapped(*args, **kwargs):
+        auth = request.headers.get("Authorization", "")
+        parts = auth.split()
+        if len(parts) != 2 or parts[0] != "Bearer":
+            return jsonify({"error": "Missing or invalid auth header"}), 401
+        token = parts[1]
+        try:
+            payload = jwt.decode(token, app.config["SECRET_KEY"], algorithms=["HS256"])
+            request.companyName = payload["companyName"]
+        except jwt.ExpiredSignatureError:
+            return jsonify({"error": "Token expired"}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({"error": "Invalid token"}), 401
+        return f(*args, **kwargs)
+    return wrapped
+
+# ─── Company Registration & Login ──────────────────────────────────────────────
+
+@app.route("/api/companies/register", methods=["POST"])
+def register_company():
+    data = request.json or {}
+    name     = data.get("companyName")
+    password = data.get("password")
+    if not name or not password:
+        return jsonify({"error": "companyName and password are required"}), 400
+
+    pw_hash = generate_password_hash(password)
+    try:
+        companies_col.insert_one({
+            "companyName":  name,
+            "passwordHash": pw_hash,
+            "createdAt":    int(time.time())
+        })
+    except DuplicateKeyError:
+        return jsonify({"error": "company already exists"}), 409
+
+    return jsonify({"message": "company registered"}), 201
+
+@app.route("/api/companies/login", methods=["POST"])
+def login_company():
+    data = request.json or {}
+    name     = data.get("companyName")
+    password = data.get("password")
+    if not name or not password:
+        return jsonify({"error": "companyName and password are required"}), 400
+
+    comp = companies_col.find_one({"companyName": name})
+    if not comp or not check_password_hash(comp["passwordHash"], password):
+        return jsonify({"error": "invalid credentials"}), 401
+
+    token = jwt.encode(
+        {
+            "companyName": name,
+            "exp":         datetime.utcnow() + timedelta(hours=24)
+        },
+        app.config["SECRET_KEY"],
+        algorithm="HS256"
+    )
+    return jsonify({"token": token}), 200
 
 # ─── Web3 / Ethereum Setup ─────────────────────────────────────────────────────
 w3 = Web3(Web3.HTTPProvider(os.getenv("HTTP_PROVIDER", "http://127.0.0.1:8545")))
@@ -77,6 +170,7 @@ def get_materials():
     return jsonify(docs), 200
 
 @app.route("/api/materials", methods=["POST"])
+@require_auth
 def create_material():
     data = request.json or {}
     if "materialId" not in data or "description" not in data:
@@ -91,14 +185,14 @@ def create_material():
         "lastSequence": 0,
         "status":       "Created",
         "createdAt":    int(time.time()),
+        "companyName":  request.companyName   # if you’re stamping companies
     }
-    if isinstance(data.get("location"), dict):
-        lat = data["location"]["lat"]
-    lng = data["location"]["lng"]
-    new_doc["location"] = {
-        "type": "Point",
-        "coordinates": [lng, lat]
-    }
+    loc = data.get("location")
+    if loc is not None:
+        try:
+            new_doc["location"] = normalize_point(loc)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
 
     # ── 1A. initialize on‑chain ─────────────────
     try:
@@ -190,20 +284,17 @@ def transfer_material(material_id):
     )
 
     # 6. GeoJSON helpers
-    def to_point(d):
-        return {
-            "type": "Point",
-            "coordinates": [d["lng"], d["lat"]]
-        }
+    # Normalize inputs: full GeoJSON or {lat,lng}
+    try:
+        pt_from = normalize_point(from_info)
+        pt_to   = normalize_point(to_info)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
-    pt_from = to_point(from_info)
-    pt_to   = to_point(to_info)
-    line    = {
+    # Build the line + collection exactly as before
+    line = {
         "type": "LineString",
-        "coordinates": [
-            pt_from["coordinates"],
-            pt_to["coordinates"]
-        ]
+        "coordinates": [pt_from["coordinates"], pt_to["coordinates"]]
     }
     path = {
         "type": "GeometryCollection",
@@ -217,11 +308,20 @@ def transfer_material(material_id):
         "to":           pt_to,
         "transferPath": path,
         "timestamp":    int(time.time()),
+        "description":  data.get("description", ""),
+        "status":       "In Transit",
         "txHash":       receipt.transactionHash.hex()
     })
 
     # 8. Return the fresh material record
+    materials_col.update_one(
+        {"materialId": material_id},
+        {"$set": {"status": "In Transit"}}
+    )
+
     updated = materials_col.find_one({"materialId": material_id}, {"_id": 0})
+
+
     return jsonify(updated), 200
 
 
@@ -497,6 +597,37 @@ def material_featurecollection(material_id):
         "type":     "FeatureCollection",
         "features": features
     }), 200
+
+@app.route("/api/transfers/log", methods=["GET"])
+def get_transfer_log():
+    # 1) Fetch all transfers, sorted by time
+    transfers = list(transfers_col.find({}, {"_id": 0})
+                     .sort("timestamp", 1))
+
+    log = []
+    for t in transfers:
+        # 2) Company who did the transfer
+        company = t.get("companyName", "Unknown")
+
+        # 3) Shorten the txHash to 10 chars
+        txid = t.get("txHash", "")[:10]
+
+        # 4) Use the human‑written note or empty string
+        desc = t.get("description", "")
+
+        # 5) Use the stored status from that transfer record
+        status = t.get("status", "")
+
+        log.append({
+            "company":       company,
+            "transactionId": txid,
+            "description":   desc,
+            "status":        status
+        })
+
+    return jsonify(log), 200
+
+
 
 
 if __name__ == "__main__":
