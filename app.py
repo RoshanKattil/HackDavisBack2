@@ -7,6 +7,10 @@ import time
 from flask import Flask, jsonify, request, Response, send_file
 from pymongo import MongoClient, ASCENDING, GEOSPHERE
 from pymongo.errors import DuplicateKeyError
+from werkzeug.security import generate_password_hash, check_password_hash
+import jwt
+from datetime import datetime, timedelta
+from functools import wraps
 from web3 import Web3
 from web3.exceptions import ContractLogicError
 from reportlab.pdfgen import canvas as pdf_canvas
@@ -14,35 +18,113 @@ from reportlab.pdfgen import canvas as pdf_canvas
 app = Flask(__name__)
 
 # ─── MongoDB Setup ─────────────────────────────────────────────────────────────
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
-client      = MongoClient(MONGODB_URI)
-db          = client["chain_custody_db"]
+client = MongoClient(os.getenv("MONGODB_URI", "mongodb://localhost:27017"))
+db     = client["chain_custody_db"]
 
-# materials collection
+# Materials
 materials_col = db["materials"]
-materials_col.create_index([("materialId", ASCENDING)], name="materialId_1", unique=True)
-materials_col.create_index([("location", GEOSPHERE)], name="location_2dsphere_idx")
+materials_col.create_index(
+    [("materialId", ASCENDING)],
+    name="materialId_1",
+    unique=True
+)
+materials_col.create_index(
+    [("location", GEOSPHERE)],
+    name="location_2dsphere_idx"
+)
 
-# transfers history collection
+# Transfers
 transfers_col = db["transfers"]
 transfers_col.create_index(
     [("materialId", ASCENDING), ("timestamp", ASCENDING)],
     name="material_ts_idx"
 )
 
-# hazardous‑waste collections
-waste_col   = db["waste"]
+# Waste (low priority for now)
+waste_col = db["waste"]
 waste_col.create_index(
     [("wasteId", ASCENDING)],
     name="wasteId_1",
     unique=True
 )
-
 history_col = db["waste_history"]
 history_col.create_index(
     [("wasteId", ASCENDING), ("timestamp", ASCENDING)],
     name="waste_history_ts_idx"
 )
+
+# ─── Companies Auth Setup ───────────────────────────────────────────────────────
+companies_col = db["companies"]
+companies_col.create_index(
+    [("companyName", ASCENDING)],
+    name="companyName_1",
+    unique=True
+)
+
+# Secret for JWT signing
+app.config["SECRET_KEY"] = os.getenv("FLASK_SECRET", "super-secret-key")
+
+def require_auth(f):
+    @wraps(f)
+    def wrapped(*args, **kwargs):
+        auth = request.headers.get("Authorization", "")
+        parts = auth.split()
+        if len(parts) != 2 or parts[0] != "Bearer":
+            return jsonify({"error": "Missing or invalid auth header"}), 401
+        token = parts[1]
+        try:
+            payload = jwt.decode(token, app.config["SECRET_KEY"], algorithms=["HS256"])
+            request.companyName = payload["companyName"]
+        except jwt.ExpiredSignatureError:
+            return jsonify({"error": "Token expired"}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({"error": "Invalid token"}), 401
+        return f(*args, **kwargs)
+    return wrapped
+
+# ─── Company Registration & Login ──────────────────────────────────────────────
+
+@app.route("/api/companies/register", methods=["POST"])
+def register_company():
+    data = request.json or {}
+    name     = data.get("companyName")
+    password = data.get("password")
+    if not name or not password:
+        return jsonify({"error": "companyName and password are required"}), 400
+
+    pw_hash = generate_password_hash(password)
+    try:
+        companies_col.insert_one({
+            "companyName":  name,
+            "passwordHash": pw_hash,
+            "createdAt":    int(time.time())
+        })
+    except DuplicateKeyError:
+        return jsonify({"error": "company already exists"}), 409
+
+    return jsonify({"message": "company registered"}), 201
+
+@app.route("/api/companies/login", methods=["POST"])
+def login_company():
+    data = request.json or {}
+    name     = data.get("companyName")
+    password = data.get("password")
+    if not name or not password:
+        return jsonify({"error": "companyName and password are required"}), 400
+
+    comp = companies_col.find_one({"companyName": name})
+    if not comp or not check_password_hash(comp["passwordHash"], password):
+        return jsonify({"error": "invalid credentials"}), 401
+
+    token = jwt.encode(
+        {
+            "companyName": name,
+            "exp":         datetime.utcnow() + timedelta(hours=24)
+        },
+        app.config["SECRET_KEY"],
+        algorithm="HS256"
+    )
+    return jsonify({"token": token}), 200
 
 # ─── Web3 / Ethereum Setup ─────────────────────────────────────────────────────
 w3 = Web3(Web3.HTTPProvider(os.getenv("HTTP_PROVIDER", "http://127.0.0.1:8545")))
