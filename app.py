@@ -245,6 +245,7 @@ def to_point(d):
     return {"type": "Point", "coordinates": [d["lng"], d["lat"]]}
 
 @app.route("/api/materials/<material_id>/transfer", methods=["POST"])
+@require_auth
 def transfer_material(material_id):
     data = request.json or {}
 
@@ -304,6 +305,7 @@ def transfer_material(material_id):
     # 7. Log the transfer step (point–line–point)
     transfers_col.insert_one({
         "materialId":   material_id,
+        "companyName":  request.companyName,
         "from":         pt_from,
         "to":           pt_to,
         "transferPath": path,
