@@ -1,211 +1,160 @@
-OLD READ ME OUT DATED THIS WAS JUST FOR SAMPLEAPI.PY Below is a **README.md** you can drop into your `sample-chain-of-custody-api/` repo and share with your front‑end developer.
+Below is a **ready‑to‑paste** section you can drop straight into your `README.md`—it walks a new developer from clone to running API + Hardhat + Mongo in ~10 minutes, plus an optional Docker one‑liner.
 
 ```markdown
-# Chain‑of‑Custody Sample API
+---
 
-This is a **Flask**‑based sample API that returns **static JSON** for all endpoints.  
-Your front‑end team can build UI & map overlays now, while the real Solana backend is in progress.
+## 🚦 Quick‑Start for New Developers
+
+> Time to first successful `curl` ≈ **10 min**
+
+### 0  Prerequisites
+
+| Tool | Version | Notes |
+|------|---------|-------|
+| **Git**          | any modern | clone repo |
+| **Node.js**      | 16 – 18 LTS | Hardhat warns on v20+ |
+| **npm** / **yarn** | bundled with Node | package manager |
+| **Python**       | 3.8 + | Flask back‑end |
+| **pip**          |   | install requirements |
+| **MongoDB**      | local Community Server **or** Atlas URI | database |
+| *(optional)* **Docker** | for one‑liner setup | |
+| *(optional)* **Poetry / venv** | isolate Python deps | |
 
 ---
 
-## 📁 Project Structure
-
-```
-sample-chain-of-custody-api/
-├── app.py
-└── requirements.txt
-```
-
----
-
-## ⚙️ Prerequisites
-
-- Python 3.7+
-- `pip`
-
----
-
-## 🚀 Getting Started
-
-1. **Clone & install**  
-   ```bash
-   git clone <repo-url>
-   cd sample-chain-of-custody-api
-   pip install -r requirements.txt
-   ```
-
-2. **Run the server**  
-   ```bash
-   python app.py
-   ```
-   By default, it listens on `http://127.0.0.1:8888/`
-
----
-
-## 🔌 API Endpoints
-
-All responses are static JSON shapes—no real Solana calls yet.
-
-### 1. Authentication
-
-| Method | Path                  | Notes                                      |
-| ------ | --------------------- | ------------------------------------------ |
-| POST   | `/api/auth/login`     | Returns a static JWT for use in headers.   |
-
-**Request**
+### 1  Clone
 
 ```bash
-curl -i -X POST http://localhost:8888/api/auth/login \
+git clone https://github.com/RoshanKattil/HackDavisBack2.git
+cd HackDavisBack2
+```
+
+---
+
+### 2  Install JS workspace (Hardhat)
+
+```bash
+cd contracts
+npm install          # hardhat, ethers, etc.
+```
+
+---
+
+### 3  Install Python back‑end
+
+```bash
+cd ../backend
+python3 -m venv venv      # (optional)
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+---
+
+### 4  Create `.env`
+
+```bash
+# in backend/
+cat > .env <<'EOF'
+MONGO_URI=mongodb://localhost:27017/custody
+HTTP_PROVIDER=http://127.0.0.1:8545
+CONTRACT_ADDRESS=
+WASTE_CONTRACT=
+EOF
+```
+
+You’ll fill the two addresses after deployment (step 7).
+
+---
+
+### 5  Run local Hardhat node
+
+```bash
+cd ../contracts
+npm run node              # JSON‑RPC at 127.0.0.1:8545
+```
+
+Keep this terminal open (it prints 20 funded accounts).
+
+---
+
+### 6  Deploy contracts
+
+```bash
+cd contracts
+npm run deploy                              # ChainCustody
+npx hardhat run scripts/deploy_waste.js --network localhost
+```
+
+Copy both contract addresses.
+
+---
+
+### 7  Paste addresses into `.env`
+
+```env
+CONTRACT_ADDRESS=0x5FbDB2315678afecb367f032d93F642f64180aa3
+WASTE_CONTRACT=0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512
+```
+
+---
+
+### 8  Initialise Mongo
+
+```bash
+cd backend
+python init_db.py          # drops/creates DB & indexes
+```
+
+---
+
+### 9  Run Flask back‑end
+
+```bash
+export HTTP_PROVIDER=http://127.0.0.1:8545   # if not in .env
+python app.py                # http://127.0.0.1:8888
+```
+
+---
+
+### 10  Smoke test
+
+```bash
+# create a material
+curl -X POST http://127.0.0.1:8888/api/materials \
   -H "Content-Type: application/json" \
-  -d '{"username":"alice","password":"password"}'
-```
+  -d '{"materialId":"M100","description":"Hello"}'
 
-**Response**
-
-```json
-HTTP/1.1 200 OK
-{
-  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sample"
-}
-```
-
----
-
-### 2. Users (RBAC Stub)
-
-| Method | Path           | Notes                          |
-| ------ | -------------- | ------------------------------ |
-| GET    | `/api/users`   | Lists sample users & roles.    |
-
-```bash
-curl -i http://localhost:8888/api/users
-```
-
----
-
-### 3. Materials
-
-| Method | Path                   | Notes                                         |
-| ------ | ---------------------- | --------------------------------------------- |
-| GET    | `/api/materials`       | List all materials                            |
-| POST   | `/api/materials`       | Create new material (static echo)             |
-| GET    | `/api/materials/:id`   | Get single material by `materialId`           |
-
-```bash
-# List
-curl -i http://localhost:8888/api/materials
-
-# Create
-curl -i -X POST http://localhost:8888/api/materials \
+# transfer it
+curl -X POST http://127.0.0.1:8888/api/materials/M100/transfer \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <token>" \
-  -d '{
-    "description":"Uranium oxide pellets, 10 kg",
-    "metadata":{"hazardClass":"7","batch":"U456"},
-    "initialHolder":"Nuclear_Fab"
-  }'
-
-# Get one
-curl -i http://localhost:8888/api/materials/MatA123
+  -d '{"newHolder":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+       "from":{"lat":34.05,"lng":-118.25},
+       "to":  {"lat":33.45,"lng":-112.07}}'
 ```
+
+Both should return **201/200 OK**.
 
 ---
 
-### 4. Custody Transfers
-
-| Method | Path                                            | Notes                                 |
-| ------ | ----------------------------------------------- | ------------------------------------- |
-| GET    | `/api/materials/:id/transfers`                  | List all transfers for one material   |
-| POST   | `/api/materials/:id/transfers`                  | Append a new transfer entry           |
+### 🚀 Docker one‑liner (optional)
 
 ```bash
-# List transfers
-curl -i http://localhost:8888/api/materials/MatA123/transfers
-
-# Add transfer
-curl -i -X POST http://localhost:8888/api/materials/MatA123/transfers \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <token>" \
-  -d '{
-    "from": {
-      "name":"Regional_Lab",
-      "location":{"lat":33.45,"lng":-112.07}
-    },
-    "to": {
-      "name":"Disposal_Facility",
-      "location":{"lat":32.22,"lng":-110.97}
-    },
-    "timestamp":1713772800,
-    "notes":"Shipped for disposal",
-    "status":"In-Transit"
-  }'
+docker compose up --build
 ```
 
+Spins up `mongo`, `hardhat-node`, and `backend` containers automatically.  
+See `docker-compose.yml` for ports and volumes.
+
 ---
 
-### 5. Status & Quarantine
+### Common Gotchas
 
-| Method | Path                                   | Notes                                 |
-| ------ | -------------------------------------- | ------------------------------------- |
-| GET    | `/api/materials/:id/status`            | Returns `{ status: "In‑Transit"… }`   |
-| POST   | `/api/materials/:id/quarantine`        | Manually set status to `"Quarantined"`|
+* **“Only holder” revert** → transfer must be signed by current on‑chain holder (default account 0).
+* **Mismatched ABI** → `initializeMaterial` now takes **two** strings: id & description.
+* Port conflicts: change `HTTP_PROVIDER` or use Docker to isolate.
 
-```bash
-# Check status
-curl -i http://localhost:8888/api/materials/MatA123/status
-
-# Trigger quarantine
-curl -i -X POST http://localhost:8888/api/materials/MatA123/quarantine \
-  -H "Authorization: Bearer <token>"
+Happy hacking! 🚀
 ```
 
----
-
-### 6. Signers (Multisig Registry)
-
-| Method | Path           | Notes                            |
-| ------ | -------------- | -------------------------------- |
-| GET    | `/api/signers` | List authorized signer pubkeys   |
-| POST   | `/api/signers` | Add a new signer entry           |
-
-```bash
-# List
-curl -i http://localhost:8888/api/signers
-
-# Add
-curl -i -X POST http://localhost:8888/api/signers \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <token>" \
-  -d '{"pubkey":"NewSignerPubKey","role":"safety_officer"}'
-```
-
----
-
-### 7. Reporting / Exports
-
-| Method | Path                                             | Notes                          |
-| ------ | ------------------------------------------------ | ------------------------------ |
-| GET    | `/api/materials/:id/export/csv`                  | Returns `{ url: "/downloads/…"}`
-| GET    | `/api/materials/:id/export/pdf`                  | Returns `{ url: "/downloads/…"}`
-| GET    | `/api/materials/:id/map-data` (optional)         | Bundled `nodes` & `edges`      |
-
-```bash
-curl -i http://localhost:8888/api/materials/MatA123/export/csv
-curl -i http://localhost:8888/api/materials/MatA123/export/pdf
-
-# Optional combined map data
-curl -i http://localhost:8888/api/materials/MatA123/map-data
-```
-
----
-
-## 🔧 Notes for Front‑End
-
-- All endpoints return **static** data.  
-- Use the sample JSON shapes to wire up your components (maps, tables, dashboards).  
-- Authentication header is **required** on POST routes—just reuse the static token.  
-- Once the Solana backend is ready, you’ll replace the stub logic in `app.py` with real RPC calls.
-
----
-
-With this README, your front‑end developer has everything needed to start building the map overlay, data grids, and UI flows—independent of the Solana work in progress.
+Add that block at the end (or in its own **“Quick‑Start”** section) and your front‑end teammate will have everything they need.
